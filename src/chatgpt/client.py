@@ -557,6 +557,7 @@ class ChatGPTClient:
         conversation_title: str | None = None,
         *,
         conversation_id: str | None = None,
+        allow_active: bool = False,
         timeout: int = 10_000,
     ):
         """Locate one exact sidebar row, scrolling Recent history as needed."""
@@ -581,7 +582,9 @@ class ChatGPTClient:
                     if conversation_title and text != conversation_title:
                         continue
                     if conversation_id and (not match or match.group(1) != conversation_id):
-                        continue
+                        active = await link.get_attribute("data-active")
+                        if not allow_active or active is None:
+                            continue
                     row = link.locator(
                         "xpath=ancestor::*[(self::li or self::div) and .//button][1]"
                     )
@@ -660,7 +663,7 @@ class ChatGPTClient:
             try:
                 active = self._page.locator(
                     f"nav a[aria-current='page'][href^='/c/{expected_thread_id}'], "
-                    f"nav a[data-active='true'][href^='/c/{expected_thread_id}']"
+                    f"nav a[data-active][href^='/c/{expected_thread_id}']"
                 ).first
                 if await active.count() and await active.is_visible():
                     return True
@@ -720,6 +723,16 @@ class ChatGPTClient:
         row = await self.find_conversation_row(
             old_title, conversation_id=conversation_id, timeout=10_000
         )
+        return await self._rename_conversation_row(row, new_title, conversation_id)
+
+    async def _rename_conversation_row(
+        self,
+        row,
+        new_title: str,
+        conversation_id: str | None,
+        *,
+        allow_active: bool = False,
+    ) -> bool:
         await row.hover()
         menu = None
         for selector in Selectors.CONVERSATION_MENU_BUTTON:
@@ -762,7 +775,10 @@ class ChatGPTClient:
         await editor.press("Enter")
         try:
             await self.find_conversation_row(
-                new_title, conversation_id=conversation_id, timeout=8_000
+                new_title,
+                conversation_id=conversation_id,
+                allow_active=allow_active,
+                timeout=8_000,
             )
             return True
         except ConversationNotFoundError:
@@ -774,7 +790,21 @@ class ChatGPTClient:
         if not thread_id:
             return False
         try:
-            return await self.rename_conversation(None, title, conversation_id=thread_id)
+            try:
+                return await self.rename_conversation(None, title, conversation_id=thread_id)
+            except ConversationNotFoundError:
+                # New ChatGPT conversations may temporarily use /c/WEB:<id>
+                # in the sidebar while the canonical ID is already in the
+                # page URL. Only the active row is accepted in this fallback.
+                row = await self.find_conversation_row(
+                    None,
+                    conversation_id=thread_id,
+                    allow_active=True,
+                    timeout=5_000,
+                )
+                return await self._rename_conversation_row(
+                    row, title, thread_id, allow_active=True
+                )
         except Exception as error:
             log.error("Conversation rename failed for %s: %s", thread_id, error)
             return False
