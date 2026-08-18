@@ -5,6 +5,8 @@
 > 适用服务器：`192.168.10.48:3061`  
 > 当前提供方：ChatGPT 网页版（浏览器自动化，不调用 OpenAI 官方 API）
 
+本次文档修订已覆盖新版运维控制台、Task Conversation、Request 状态机、Conversation URL 持久化与可信局域网免登录模式。
+
 ## 1. 服务概览
 
 GPT-FastAPI 使用 FastAPI 对外提供 HTTP API，通过 Patchright 控制服务器上已登录 ChatGPT 的真实 Chromium 页面完成对话、图片生成和文件处理。
@@ -32,6 +34,9 @@ ChatGPT 网页版
 - 前一个浏览器任务结束后至少间隔 30 秒，下一个任务才会开始，以避免高频访问 ChatGPT 网页。
 - Token 使用 Windows DPAPI 加密保存，可在可信内网 Dashboard 中反复复制。
 - 浏览器运行层可以从 Dashboard 启动或停止；停止后 Dashboard 和数据接口继续可用。
+- 多智能体项目可为每个 Agent 创建独立 `task_id`；Task 永久绑定自己的 `session_id`、`provider_thread_id` 和 `provider_thread_url`。
+- 每次 Task 提交都会生成独立 `request_id`，可同步等待，也可异步提交后查询状态。
+- Dashboard 可直接查看 Task、Request、Conversation URL、当前队列和 Provider 风控状态，但不会展示请求或响应正文。
 
 ## 2. 服务地址
 
@@ -60,6 +65,14 @@ Invoke-RestMethod http://192.168.10.48:3061/healthz
 ```
 
 ## 3. 认证方式
+
+当前服务器设置为可信局域网免登录模式：打开 Dashboard 即可使用，无需输入管理员 Token。该行为由以下配置控制：
+
+```dotenv
+DASHBOARD_REQUIRE_ADMIN_TOKEN=false
+```
+
+这只影响 Dashboard 和 `/api/dashboard/*` 运维接口。`/v1/*` 业务接口仍必须携带 Project Token；Agent 创建、能力修改等高权限 API 仍需要 `X-Admin-Token`。如果未来把开关恢复为 `true`，Dashboard 会重新显示管理员 Token 登录页。
 
 ### 3.1 获取 Project Token
 
@@ -246,6 +259,145 @@ Invoke-RestMethod `
 ```
 
 同一智能体应持续复用自己的 `session_id`。不要让多个智能体共用一个 session，否则它们将共享相同网页上下文并被串行处理。
+
+### 6.1 Agent 与能力管理
+
+多智能体项目通过能力白名单限制每个 Agent 可执行的操作。可用能力由 `GET /v1/capabilities` 返回，常用 Task 能力包括：
+
+| 能力 | 用途 |
+|---|---|
+| `agent.read` | 查看自身或项目 Agent 信息 |
+| `task.create` | 创建 Task Conversation |
+| `task.list` | 列出自己的 Tasks |
+| `task.read` | 查看 Task 与 Request 状态 |
+| `task.send` | 向 Task Conversation 发送消息 |
+| `task.cancel` | 取消尚未进入浏览器执行的请求 |
+| `file.read` | 使用已上传文件作为 Task 附件 |
+| `runtime.read` | 查看安全运行状态 |
+
+Agent 管理接口：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/v1/capabilities` | 列出能力目录及当前 Provider 是否支持 |
+| `GET` | `/v1/agents` | 列出当前项目 Agents |
+| `POST` | `/v1/agents` | 创建 Agent，需要 `X-Admin-Token` |
+| `GET` | `/v1/agents/{agent_id}` | 查询 Agent 与能力 |
+| `PATCH` | `/v1/agents/{agent_id}` | 更新或启停 Agent，需要 `X-Admin-Token` |
+| `DELETE` | `/v1/agents/{agent_id}` | 停用 Agent 并保留历史，需要 `X-Admin-Token` |
+| `GET` | `/v1/agents/{agent_id}/capabilities` | 查询 Agent 能力 |
+| `PUT` | `/v1/agents/{agent_id}/capabilities` | 替换能力集合，需要 `X-Admin-Token` |
+
+创建 Agent 示例：
+
+```powershell
+$adminHeaders = $headers.Clone()
+$adminHeaders["X-Admin-Token"] = "<ADMIN_TOKEN>"
+$body = @{
+    agent_id     = "writer"
+    name         = "写作智能体"
+    description  = "负责撰写和修改内容"
+    capabilities = @("agent.read", "task.create", "task.list", "task.read", "task.send", "runtime.read")
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://192.168.10.48:3061/v1/agents" `
+    -Headers $adminHeaders `
+    -ContentType "application/json" `
+    -Body $body
+```
+
+### 6.2 Task Conversation
+
+Task Conversation 是多智能体接入的推荐模型：一个 Task 固定属于一个 Agent，并绑定一个内部 session 和一个 ChatGPT 网页对话。第一次成功发送消息后，服务会保存真实 `provider_thread_id` 与 `provider_thread_url`，后续发送前必须精确切换并验证该 Conversation。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/v1/tasks` | 创建独立 Task Conversation |
+| `GET` | `/v1/tasks?agent_id=writer&limit=100` | 列出 Tasks，最大 500 条 |
+| `GET` | `/v1/agents/{agent_id}/tasks` | 列出指定 Agent 的 Tasks |
+| `GET` | `/v1/tasks/{task_id}` | 查询 Task、Conversation ID 和 URL |
+| `POST` | `/v1/tasks/{task_id}/messages` | 向固定 Conversation 提交消息 |
+| `POST` | `/v1/tasks/{task_id}/cancel?request_id=...` | 取消尚未进入浏览器的请求 |
+| `GET` | `/v1/requests/{request_id}` | 查询请求状态与最终结果 |
+| `GET` | `/v1/runtime/status` | 查看容量、队列、当前 Task/Request 和风控状态 |
+
+创建 Task：
+
+```powershell
+$agentHeaders = $headers.Clone()
+$agentHeaders["X-Agent-ID"] = "writer"
+$body = @{ agent_id = "writer"; name = "2026-08-18 产品说明书" } | ConvertTo-Json
+
+$task = Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://192.168.10.48:3061/v1/tasks" `
+    -Headers $agentHeaders `
+    -ContentType "application/json" `
+    -Body $body
+
+$taskId = $task.task_id
+```
+
+同步发送并等待结果：
+
+```powershell
+$body = @{
+    content         = "请生成第一版产品说明书"
+    file_ids        = @()
+    idempotency_key = "product-guide-v1"
+} | ConvertTo-Json
+
+$result = Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://192.168.10.48:3061/v1/tasks/$taskId/messages" `
+    -Headers $agentHeaders `
+    -ContentType "application/json" `
+    -Body $body
+```
+
+异步提交：
+
+```powershell
+$asyncHeaders = $agentHeaders.Clone()
+$asyncHeaders["Prefer"] = "respond-async"
+$accepted = Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://192.168.10.48:3061/v1/tasks/$taskId/messages" `
+    -Headers $asyncHeaders `
+    -ContentType "application/json" `
+    -Body $body
+
+$requestId = $accepted.request_id
+Invoke-RestMethod `
+    -Uri "http://192.168.10.48:3061/v1/requests/$requestId" `
+    -Headers $agentHeaders
+```
+
+`idempotency_key` 也可放在 `Idempotency-Key` 请求头中。同一项目、Agent 和幂等键重复提交相同内容时复用原 Request；内容不同则返回 HTTP 409。
+
+Task 常见状态：`created`、`queued`、`idle`、`error`、`unknown`。Request 状态按实际阶段变化：
+
+```text
+queued → waiting_gap → switching_conversation → waiting_response → completed
+                                                        ├→ failed
+                                                        └→ unknown
+queued / waiting_gap → cancelled
+```
+
+只有 `queued` 或 `waiting_gap` 请求可以取消。`unknown` 表示发送后无法可靠确认 Provider 最终状态，不应自动重试相同内容，应先查询 Request、Dashboard 和 ChatGPT 页面。
+
+Task 查询的重要字段：
+
+| 字段 | 说明 |
+|---|---|
+| `task_id` | Gateway Task ID，也是 ChatGPT 对话重命名目标 |
+| `session_id` | Task 固定绑定的内部会话 |
+| `provider_thread_id` | ChatGPT 真实 Conversation ID |
+| `provider_thread_url` | 已验证并持久化的 ChatGPT Conversation URL |
+| `conversation_ready` | 是否已经成功创建真实 Conversation |
+| `status` | 当前 Task 状态 |
 
 ## 7. OpenAI 兼容接口
 
@@ -489,15 +641,61 @@ a[href^='/c/']
 
 ## 11. Dashboard 与运维接口
 
-Dashboard 无需输入 API Token，但管理操作仅允许服务器本机或可信私网访问，并检查同源请求。
+当前 Dashboard 地址为：
+
+```text
+http://192.168.10.48:3061/dashboard
+```
+
+当前部署设置 `DASHBOARD_REQUIRE_ADMIN_TOKEN=false`，打开页面会直接加载实时数据。所有 Dashboard 数据和操作仍只允许服务器本机或可信私网访问，并检查同源请求；不要把 3061 端口直接映射到公网。
+
+页面包含四个工作视图：
+
+| 视图 | 内容 |
+|---|---|
+| 概览 | 运行层、登录状态、Worker/队列、API 调用、当前 Task/Request、Provider 风控、任务机和最近 API 调用 |
+| 任务与对话 | 跨项目 Task、Agent、状态、Conversation ID/URL、Request 状态机、错误类型和耗时 |
+| 项目授权 | 创建、复制、轮换、启停和删除 Project Token |
+| 服务日志 | 选择按日日志、筛选警告/错误、自动跟随最新内容 |
+
+顶部工具栏可以启动或停止运行层、立即刷新、打开 Swagger API 文档并下载本说明书。页面每 5 秒刷新一次状态；未配置免登录时，Token 只保存在当前浏览器会话的 `sessionStorage` 中。
 
 ### 11.1 状态与日志
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/dashboard/state` | 服务、浏览器、池、项目、存储和任务机状态 |
+| `GET` | `/api/dashboard/state` | 服务、浏览器、队列、风控、项目、Task、Request、存储和任务机状态 |
 | `GET` | `/api/dashboard/logs` | 日志文件列表或指定日志末尾内容 |
-| `GET` | `/api/dashboard/developer-guide` | 下载当前 Markdown 开发说明书，无需 Token |
+| `GET` | `/api/dashboard/developer-guide` | 下载当前 Markdown 开发说明书 |
+
+`/api/dashboard/state` 的 `activity` 字段最多返回最近 40 个 Task 和 60 个 Request，并附带状态计数。该数据刻意排除提示词、回复正文、文件内容、Project Token、请求内容哈希和幂等键。
+
+关键结构示例：
+
+```json
+{
+  "service": {
+    "status": "ok",
+    "logged_in": true,
+    "dashboard_auth_required": false
+  },
+  "pool": {
+    "capacity": 1,
+    "available": 1,
+    "busy": 0,
+    "queue_depth": 0,
+    "current_task_id": null,
+    "current_request_id": null,
+    "risk": {"state": "healthy", "reason": ""}
+  },
+  "activity": {
+    "tasks": [],
+    "requests": [],
+    "task_statuses": {},
+    "request_statuses": {}
+  }
+}
+```
 
 日志目录：
 
@@ -525,6 +723,7 @@ C:\ChatGPTAPI\logs
 | `GET` | `/api/dashboard/runtime` | 查看人工期望状态和实际运行状态 |
 | `POST` | `/api/dashboard/runtime/start` | 启动浏览器、恢复登录并创建 Worker 页面 |
 | `POST` | `/api/dashboard/runtime/stop` | 停止浏览器业务并关闭全部项目页面 |
+| `POST` | `/api/dashboard/runtime/risk/resume` | 人工确认 Provider 已恢复并解除风控熔断 |
 
 停止后的行为：
 
@@ -532,6 +731,8 @@ C:\ChatGPTAPI\logs
 - 浏览器类业务请求返回 HTTP 503，错误类型为 `runtime_unavailable`。
 - 主浏览器和 Worker 页面全部关闭。
 - 人工停止状态持久化，Windows 守护脚本不会误判为故障并自动拉起。
+- Windows 守护脚本每 10 秒检查一次内部运行状态；浏览器主页面持续异常时会重启完整 API/浏览器上下文。
+- `challenged` 或 `disabled` 等 Provider 风控状态需要先在前台浏览器完成登录或人工验证，再点击“人工恢复”。
 
 ## 12. 常见状态码
 
@@ -546,7 +747,9 @@ C:\ChatGPTAPI\logs
 | `410` | 文件内容已经过期清理 | 重新上传文件 |
 | `413` | 文件大小、数量或项目总配额超限 | 减少文件或清理存储 |
 | `422` | 字段格式错误；多智能体项目缺少 agent_id | 按接口模型修正请求 |
+| `429` | 单 Worker 队列已满 | 稍后重试或减少并发提交 |
 | `500` | ChatGPT 网页、选择器或浏览器执行异常 | 使用 X-Request-ID 查询错误日志 |
+| `502` | Provider 页面执行失败 | 使用 request_id 查询 Request 与错误日志 |
 | `503` | 浏览器运行层已停止、启动中或 Worker 尚未初始化 | 在 Dashboard 启动项目并等待运行中 |
 
 ## 13. 使用注意事项
@@ -558,6 +761,8 @@ C:\ChatGPTAPI\logs
 5. 不要手动关闭前台 ChatGPT 窗口或 Worker 标签页。服务带有 Worker 页面健康检查，但人工维护应使用 Dashboard 的启动/停止按钮。
 6. 不要把 3061 端口直接暴露到公网；Dashboard 管理接口设计用于可信局域网。
 7. 对调用结果设置合理超时。网页自动化响应时间通常高于官方 API。
+8. Task 模式必须持久化 `task_id` 和 `request_id`；不要从 ChatGPT 侧栏临时链接推断 Conversation。
+9. Request 进入 `unknown` 后先人工核对，不要直接使用新幂等键重复发送相同内容。
 
 ## 14. 最小接入清单
 
@@ -568,4 +773,7 @@ C:\ChatGPTAPI\logs
 - 使用 `/v1/sessions/{session_id}/messages` 或 OpenAI 兼容接口发送消息。
 - 每次请求携带 `Authorization`、`X-Task-Machine`、`X-Task-Name`。
 - 使用 `GET /v1/sessions` 找回最近会话。
-- 使用 Dashboard 和按日日志排查 401、403、500、503。
+- 多智能体项目先创建 Agent 并分配最小必要能力，再创建 Task Conversation。
+- 异步调用持久化保存 `request_id`，使用 `/v1/requests/{request_id}` 查询最终状态。
+- 在 Dashboard“任务与对话”视图核对 Task 与 Conversation URL 的绑定。
+- 使用 Dashboard 和按日日志排查 401、403、429、500、502、503。
