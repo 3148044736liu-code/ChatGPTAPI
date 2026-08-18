@@ -89,6 +89,9 @@ class Config:
     API_USER_TOKENS: str = os.getenv("API_USER_TOKENS", "")
     ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
     BOOTSTRAP_ADMIN_TOKEN: str = os.getenv("BOOTSTRAP_ADMIN_TOKEN", "")
+    DASHBOARD_REQUIRE_ADMIN_TOKEN: bool = os.getenv(
+        "DASHBOARD_REQUIRE_ADMIN_TOKEN", "true"
+    ).lower() == "true"
     DOWNLOAD_SECRET: str = os.getenv("DOWNLOAD_SECRET", "") or API_TOKEN or secrets.token_hex(32)
     MAX_CONCURRENT_SESSIONS: int = max(1, int(os.getenv("MAX_CONCURRENT_SESSIONS", "1")))
     # Minimum idle time between browser-backed requests.  The runtime

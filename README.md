@@ -130,6 +130,7 @@ API_PORT=3061
 # 请替换为随机强 Token
 API_TOKEN=replace-with-a-strong-token
 ADMIN_TOKEN=replace-with-a-separate-admin-token
+DASHBOARD_REQUIRE_ADMIN_TOKEN=true
 DOWNLOAD_SECRET=replace-with-another-random-secret
 
 # 浏览器 Worker 数量：当前部署固定使用 1 个 Worker
@@ -216,6 +217,7 @@ curl http://127.0.0.1:3061/status \
 | `API_PORT` | FastAPI 监听端口 | `3061` |
 | `API_TOKEN` | 默认 Bearer Token | 随机强字符串 |
 | `ADMIN_TOKEN` | Dashboard 与管理 API 的独立管理员 Token | 与项目 Token 不同的随机强字符串 |
+| `DASHBOARD_REQUIRE_ADMIN_TOKEN` | Dashboard 是否要求管理员 Token；仅可信局域网可设为 `false` | `true` |
 | `API_USER_TOKENS` | 多用户 Token，格式为 `用户:Token`，逗号分隔 | `alice:token1,bob:token2` |
 | `MAX_CONCURRENT_SESSIONS` | 浏览器 Worker 池容量（当前部署使用单 Worker） | `1` |
 | `BROWSER_TASK_GAP_MIN_SECONDS` / `MAX` | 相邻浏览器任务的随机 start-to-start 间隔 | `30` / `50` |
@@ -237,7 +239,7 @@ curl http://127.0.0.1:3061/status \
 
 ## 运行仪表盘与任务机标识
 
-访问 `http://<服务器 IP>:3061/dashboard` 即可直接查看，无需输入 API Token：
+访问 `http://<服务器 IP>:3061/dashboard`。设置 `DASHBOARD_REQUIRE_ADMIN_TOKEN=false` 后可直接使用；保持默认值时需输入 `ADMIN_TOKEN`：
 
 - 服务、登录与浏览器前台状态。
 - 单浏览器 Worker 队列的容量、空闲与占用数。

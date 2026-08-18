@@ -32,6 +32,21 @@ $envText = if (Test-Path -LiteralPath $envFile) {
     [IO.File]::ReadAllText($envFile)
 } else { "" }
 $keepForeground = $envText -match '(?im)^BROWSER_KEEP_FOREGROUND\s*=\s*true\s*$'
+$adminToken = ""
+$adminTokenMatch = [regex]::Match(
+    $envText,
+    '(?im)^\s*ADMIN_TOKEN\s*=\s*(?:"([^"]*)"|''([^'']*)''|([^\r\n#]*))'
+)
+if ($adminTokenMatch.Success) {
+    $adminToken = @(
+        $adminTokenMatch.Groups[1].Value,
+        $adminTokenMatch.Groups[2].Value,
+        $adminTokenMatch.Groups[3].Value
+    ) | Where-Object { $_ } | Select-Object -First 1
+    $adminToken = $adminToken.Trim()
+}
+$dashboardHeaders = @{}
+if ($adminToken) { $dashboardHeaders["X-Admin-Token"] = $adminToken }
 $env:NO_PROXY = "127.0.0.1,localhost"
 $env:no_proxy = $env:NO_PROXY
 
@@ -151,6 +166,7 @@ while ($true) {
             try {
                 $runtime = Invoke-RestMethod `
                     -Uri "http://127.0.0.1:3061/api/dashboard/state" `
+                    -Headers $dashboardHeaders `
                     -TimeoutSec 8
                 if ($runtime.runtime.status -eq "starting") {
                     # A dashboard-triggered start may need time to restore the

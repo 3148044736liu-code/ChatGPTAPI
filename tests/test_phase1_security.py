@@ -114,3 +114,10 @@ def test_dashboard_requires_dedicated_admin_token():
     with pytest.raises(HTTPException) as captured:
         _require_admin(_admin_request("wrong-token"))
     assert captured.value.status_code == 401
+
+
+def test_dashboard_can_disable_token_auth_on_private_network(monkeypatch):
+    from src.api.dashboard import _require_admin
+
+    monkeypatch.setattr(Config, "DASHBOARD_REQUIRE_ADMIN_TOKEN", False)
+    _require_admin(_admin_request(""))

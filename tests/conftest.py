@@ -34,6 +34,7 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "OPENAI_USE_SESSION_POOL", False)
     monkeypatch.setattr(Config, "ADMIN_TOKEN", "admin-test-token")
     monkeypatch.setattr(Config, "BOOTSTRAP_ADMIN_TOKEN", "")
+    monkeypatch.setattr(Config, "DASHBOARD_REQUIRE_ADMIN_TOKEN", True)
     monkeypatch.setattr(Config, "CORS_ALLOWED_ORIGINS", ())
     monkeypatch.setattr(Config, "BROWSER_TASK_GAP_MIN_SECONDS", 0.0)
     monkeypatch.setattr(Config, "BROWSER_TASK_GAP_MAX_SECONDS", 0.0)

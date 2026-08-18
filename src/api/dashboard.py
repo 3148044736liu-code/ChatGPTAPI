@@ -233,6 +233,23 @@ def _project_database():
 
 def _require_admin(request: Request) -> None:
     """Require a dedicated admin secret; private origin is defense in depth."""
+    address = request.client.host if request.client else ""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError as error:
+        raise HTTPException(status_code=403, detail="Project administration is private-network only") from error
+    if not (ip.is_private or ip.is_loopback):
+        raise HTTPException(status_code=403, detail="Project administration is private-network only")
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if origin:
+        origin_host = urlparse(origin).hostname
+        request_host = (request.url.hostname or "").lower()
+        if not origin_host or origin_host.lower() != request_host:
+            raise HTTPException(status_code=403, detail="Cross-site project administration is forbidden")
+
+    if not Config.DASHBOARD_REQUIRE_ADMIN_TOKEN:
+        return
+
     authorization = request.headers.get("authorization", "")
     bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
     provided = request.headers.get("x-admin-token", "") or bearer
@@ -256,19 +273,6 @@ def _require_admin(request: Request) -> None:
             request.client.host if request.client else "unknown",
         )
         raise HTTPException(status_code=401, detail="Invalid or missing admin token")
-    address = request.client.host if request.client else ""
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError as error:
-        raise HTTPException(status_code=403, detail="Project administration is private-network only") from error
-    if not (ip.is_private or ip.is_loopback):
-        raise HTTPException(status_code=403, detail="Project administration is private-network only")
-    origin = request.headers.get("origin") or request.headers.get("referer")
-    if origin:
-        origin_host = urlparse(origin).hostname
-        request_host = (request.url.hostname or "").lower()
-        if not origin_host or origin_host.lower() != request_host:
-            raise HTTPException(status_code=403, detail="Cross-site project administration is forbidden")
 
 
 def _project_id(value: str | None) -> str:
@@ -499,6 +503,7 @@ async def dashboard_state(request: Request):
             "base_url": str(request.base_url).rstrip("/"),
             "version": "1.4.4",
             "logged_in": logged_in,
+            "dashboard_auth_required": Config.DASHBOARD_REQUIRE_ADMIN_TOKEN,
         },
         "browser": browser_state,
         "foreground": foreground,

@@ -230,12 +230,18 @@
     async function apiJson(url, options={}) { const response=await fetch(url,{cache:'no-store',...options,headers:headers({'Content-Type':'application/json',...(options.headers||{})})}); if(!response.ok) throw new Error(await responseError(response)); return response.json(); }
     async function copyText(value) { try { await navigator.clipboard.writeText(value); return true; } catch { const box=document.createElement('textarea'); box.value=value; box.style.position='fixed'; box.style.opacity='0'; document.body.appendChild(box); box.select(); const ok=document.execCommand('copy'); box.remove(); return ok; } }
     function safeConversationUrl(value) { try { const url=new URL(value); return url.protocol==='https:' && (url.hostname==='chatgpt.com'||url.hostname.endsWith('.chatgpt.com')) ? url.href : ''; } catch { return ''; } }
-    function setAuthenticated(value) { $('authPanel').classList.toggle('hidden',value); $('mainContent').classList.toggle('hidden',!value); $('lockBtn').classList.toggle('hidden',!value); }
+    function setAuthenticated(value, lockAllowed=true) { $('authPanel').classList.toggle('hidden',value); $('mainContent').classList.toggle('hidden',!value); $('lockBtn').classList.toggle('hidden',!value||!lockAllowed); }
     function lockConsole(message='') { adminToken=''; currentState=null; sessionStorage.removeItem('gptFastApiAdminToken'); $('adminToken').value=''; $('authError').textContent=message; setAuthenticated(false); setLive('','待认证'); }
     async function authenticate(candidate) {
       adminToken=candidate.trim(); $('authError').textContent=''; setLive('warn','正在认证');
-      try { const state=await apiJson('/api/dashboard/state'); sessionStorage.setItem('gptFastApiAdminToken',adminToken); setAuthenticated(true); currentState=state; render(state); setLive('ok','实时连接'); await loadProjects(); }
+      try { const state=await apiJson('/api/dashboard/state'); sessionStorage.setItem('gptFastApiAdminToken',adminToken); setAuthenticated(true,state.service?.dashboard_auth_required!==false); currentState=state; render(state); setLive('ok','实时连接'); await loadProjects(); }
       catch(error) { lockConsole(error.message==='Invalid or missing admin token'?'管理员 Token 无效':`认证失败：${error.message}`); }
+    }
+    async function initializeConsole() {
+      if(adminToken) { await authenticate(adminToken); return; }
+      setLive('warn','正在连接');
+      try { const state=await apiJson('/api/dashboard/state'); currentState=state; setAuthenticated(true,state.service?.dashboard_auth_required!==false); render(state); setLive('ok','实时连接'); await loadProjects(); }
+      catch(error) { lockConsole(error.message==='Invalid or missing admin token'?'请输入管理员 Token':`连接失败：${error.message}`); }
     }
     async function loadState(showToast=false) {
       if(!adminToken) return;
@@ -312,7 +318,7 @@
     $('projectForm').addEventListener('submit',async event=>{event.preventDefault();try{const data=await apiJson('/api/dashboard/projects',{method:'POST',body:JSON.stringify({name:$('projectName').value,project_id:$('projectId').value||null,description:$('projectDesc').value,multi_agent:$('projectMultiAgent').checked})});revealToken(data.token);event.target.reset();await loadProjects();await loadState();toast('项目 Token 已生成');}catch(error){toast(error.message);}});
     $('copyToken').addEventListener('click',async()=>toast(await copyText($('tokenValue').textContent)?'Token 已复制':'复制失败'));
     $('refreshLogs').addEventListener('click',loadLogs); $('logFile').addEventListener('change',loadLogs); $('logLevel').addEventListener('change',renderLogs);
-    $('adminToken').value=adminToken; if(adminToken)authenticate(adminToken); else setAuthenticated(false);
+    $('adminToken').value=adminToken; initializeConsole();
     setInterval(()=>{if(adminToken){loadState();if(currentView==='logs'&&$('autoFollow').checked)loadLogs();}},5000);
   </script>
 </body>
