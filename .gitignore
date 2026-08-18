@@ -1,0 +1,49 @@
+# Browser profiles and bundled browsers
+browser_data/
+browser_data_claude/
+chrome-profile/
+.browsers/
+
+# Logs, downloads, runtime data, and local backups
+logs/
+docker-logs/
+downloads/
+data/
+.codex_backup/
+.setup/
+.runtime/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and credentials
+.env
+cookies.json
+*.pem
+*.key
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Nix
+result
