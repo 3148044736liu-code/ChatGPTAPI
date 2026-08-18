@@ -45,6 +45,37 @@ def test_agent_task_and_idempotent_request_models(database):
     assert second["id"] == first["id"]
 
 
+def test_dashboard_activity_exposes_metadata_without_payloads(database):
+    database.create_project(project_id="project-a", name="Project A")
+    database.create_agent("project-a", "writer", "Writer")
+    task = database.create_task("project-a", "writer", "Draft", "chatgpt")
+    request, _ = database.create_request(
+        project_id="project-a",
+        agent_id="writer",
+        task_id=task["task_id"],
+        session_id=task["session_id"],
+        content_hash="secret-content-hash",
+        idempotency_key="secret-idempotency-key",
+    )
+    database.update_request(
+        request["id"],
+        "completed",
+        provider_thread_id="thread-1",
+        provider_thread_url="https://chatgpt.com/c/thread-1",
+        result={"message": "secret-response"},
+    )
+
+    activity = database.dashboard_activity()
+
+    assert activity["tasks"][0]["project_name"] == "Project A"
+    assert activity["requests"][0]["task_name"] == "Draft"
+    assert activity["requests"][0]["provider_thread_url"].endswith("/thread-1")
+    assert activity["request_statuses"] == {"completed": 1}
+    assert "result" not in activity["requests"][0]
+    assert "content_hash" not in activity["requests"][0]
+    assert "idempotency_key" not in activity["requests"][0]
+
+
 class _RoutingClient:
     def __init__(self):
         self.current = "wrong"

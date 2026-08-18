@@ -878,6 +878,59 @@ class Database:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
+    def dashboard_activity(
+        self,
+        *,
+        task_limit: int = 40,
+        request_limit: int = 60,
+    ) -> dict[str, Any]:
+        """Return cross-project operational metadata without message contents."""
+        task_limit = max(1, min(int(task_limit), 200))
+        request_limit = max(1, min(int(request_limit), 300))
+        with self._lock, self._connect() as connection:
+            task_rows = connection.execute(
+                """
+                SELECT t.task_id, t.project_id, p.name AS project_name,
+                       t.agent_id, t.session_id, t.provider_thread_id,
+                       t.provider_thread_url, t.provider_title, t.name,
+                       t.status, t.created_at, t.updated_at, t.last_started_at
+                FROM tasks AS t
+                LEFT JOIN projects AS p ON p.project_id = t.project_id
+                ORDER BY t.updated_at DESC
+                LIMIT ?
+                """,
+                (task_limit,),
+            ).fetchall()
+            request_rows = connection.execute(
+                """
+                SELECT r.id, r.project_id, p.name AS project_name,
+                       r.agent_id, r.task_id, t.name AS task_name,
+                       r.session_id, r.status, r.provider_thread_id,
+                       r.provider_thread_url, r.error_type, r.sent_at,
+                       r.completed_at, r.created_at, r.updated_at
+                FROM requests AS r
+                LEFT JOIN projects AS p ON p.project_id = r.project_id
+                LEFT JOIN tasks AS t ON t.task_id = r.task_id
+                ORDER BY r.updated_at DESC
+                LIMIT ?
+                """,
+                (request_limit,),
+            ).fetchall()
+            task_statuses = connection.execute(
+                "SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"
+            ).fetchall()
+            request_statuses = connection.execute(
+                "SELECT status, COUNT(*) AS count FROM requests GROUP BY status"
+            ).fetchall()
+        return {
+            "tasks": [dict(row) for row in task_rows],
+            "requests": [dict(row) for row in request_rows],
+            "task_statuses": {row["status"]: row["count"] for row in task_statuses},
+            "request_statuses": {
+                row["status"]: row["count"] for row in request_statuses
+            },
+        }
+
     def set_task_status(
         self,
         project_id: str,

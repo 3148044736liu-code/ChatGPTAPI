@@ -467,9 +467,16 @@ async def dashboard_state(request: Request):
         if _database is not None
         else {"sessions": 0, "messages": 0, "files": 0, "file_bytes": 0}
     )
+    activity = {
+        "tasks": [],
+        "requests": [],
+        "task_statuses": {},
+        "request_statuses": {},
+    }
     if _database is not None:
         database_state["projects"] = _database.project_count()
         database_state["enabled_projects"] = _database.project_count(enabled_only=True)
+        activity = _database.dashboard_activity()
     browser_state = _browser_state()
     logged_in = await _logged_in(browser_state["ready"])
     foreground = _foreground_state()
@@ -497,5 +504,6 @@ async def dashboard_state(request: Request):
         "foreground": foreground,
         "pool": pool_state,
         "storage": database_state,
+        "activity": activity,
         "telemetry": telemetry,
     }
