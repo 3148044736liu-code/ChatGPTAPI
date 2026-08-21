@@ -497,7 +497,10 @@ class ChatGPTClient:
                     if (title.includes("can't be reached") || title.includes("is not available"))
                         return 'page_unreachable';
                     if (/captcha|verify you are human|unusual activity/i.test(body)) return 'CAPTCHA challenge';
-                    if (/log in|sign in/i.test(body) && !document.querySelector('#prompt-textarea')) return 'login required';
+                    const composer = document.querySelector(
+                        '#prompt-textarea, textarea[name="prompt-textarea"], textarea[aria-label="Chat with ChatGPT"], div[contenteditable="true"]'
+                    );
+                    if (/log in|sign in/i.test(body) && !composer) return 'login required';
                     if (/rate limit|too many requests/i.test(body)) return 'rate limit';
                     if (/high demand|try again later/i.test(body)) return 'high demand';
                     if (body.includes('Something went wrong')) return 'ChatGPT_error';
@@ -1053,8 +1056,10 @@ class ChatGPTClient:
         try:
             text = await self._page.evaluate(
                 """() => {
-                    const el = document.querySelector('#prompt-textarea');
-                    return el ? (el.innerText || '').trim() : '';
+                    const el = document.querySelector(
+                        '#prompt-textarea, textarea[name="prompt-textarea"], textarea[aria-label="Chat with ChatGPT"], div[contenteditable="true"]'
+                    );
+                    return el ? (el.value || el.innerText || el.textContent || '').trim() : '';
                 }"""
             )
             return bool(text)

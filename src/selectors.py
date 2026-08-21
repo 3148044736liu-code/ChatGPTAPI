@@ -15,6 +15,8 @@ class Selectors:
     # ── Chat input ──────────────────────────────────────────────
     CHAT_INPUT = [
         "#prompt-textarea",
+        "textarea[name='prompt-textarea']",
+        "textarea[aria-label='Chat with ChatGPT']",
         "div[contenteditable='true'][id='prompt-textarea']",
         "div[contenteditable='true']",
     ]

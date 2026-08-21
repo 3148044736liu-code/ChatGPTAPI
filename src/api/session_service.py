@@ -16,7 +16,7 @@ from src.browser.manager import BrowserManager
 from src.chatgpt.client import ChatGPTClient
 from src.claude.client import ClaudeClient
 from src.config import Config
-from src.files.generated import capture_generated_files
+from src.files.generated import NetworkFileCapture, capture_generated_files
 from src.log import setup_logging
 from src.provider_errors import ProviderStateUnknownError
 
@@ -166,34 +166,47 @@ class SessionWorkerPool:
         # prevents future preparation hooks from switching the shared page
         # after routing but before composer input.
         await self._router.verify(client, job.provider_thread_id)
+        # NetworkFileCapture is intentionally a *fallback* in the new
+        # architecture — it only helps when the DOM-click path misses
+        # (e.g. ChatGPT triggers a JS fetch + blob that does not fire a
+        # real download event).  The DOM pipeline runs regardless.
+        net_capture = NetworkFileCapture(client.page)
+        net_capture.start()
         try:
-            result = await client.send_message(job.message, file_paths=job.file_paths or None)
-        except Exception as error:
             try:
-                dead = client.page.is_closed()
-            except Exception:
-                dead = True
-            if dead:
-                raise ProviderStateUnknownError(
-                    "Browser page closed after request execution began; delivery state is unknown"
-                ) from error
-            raise
-        if job.task_id and not job.provider_thread_id:
-            if not result.thread_id:
-                resolver = getattr(client, "resolve_current_thread_id", None)
-                if resolver is not None:
-                    result.thread_id = await resolver()
-            if not result.thread_id:
-                raise RuntimeError("Provider did not expose a conversation ID after sending")
-            await self._router.bind_created(
-                client,
-                task_id=job.task_id,
-                provider_thread_id=result.thread_id,
+                result = await client.send_message(job.message, file_paths=job.file_paths or None)
+            except Exception as error:
+                try:
+                    dead = client.page.is_closed()
+                except Exception:
+                    dead = True
+                if dead:
+                    raise ProviderStateUnknownError(
+                        "Browser page closed after request execution began; delivery state is unknown"
+                    ) from error
+                raise
+            if job.task_id and not job.provider_thread_id:
+                if not result.thread_id:
+                    resolver = getattr(client, "resolve_current_thread_id", None)
+                    if resolver is not None:
+                        result.thread_id = await resolver()
+                if not result.thread_id:
+                    raise RuntimeError("Provider did not expose a conversation ID after sending")
+                await self._router.bind_created(
+                    client,
+                    task_id=job.task_id,
+                    provider_thread_id=result.thread_id,
+                )
+            if result.thread_id and not result.thread_url:
+                result.thread_url = getattr(client.page, "url", "")
+            generated = await capture_generated_files(
+                client.page,
+                job.generated_dir,
+                network_capture=net_capture,
             )
-        if result.thread_id and not result.thread_url:
-            result.thread_url = getattr(client.page, "url", "")
-        generated = await capture_generated_files(client.page, job.generated_dir)
-        return result, generated
+            return result, generated
+        finally:
+            net_capture.stop()
 
     async def _run(self) -> None:
         while True:

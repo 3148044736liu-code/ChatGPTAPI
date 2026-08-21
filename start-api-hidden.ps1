@@ -81,6 +81,23 @@ function Write-ForegroundState {
     )
 }
 
+# Kill any orphan python.exe/pythonw.exe still holding the API port.
+# ``Stop-ScheduledTask`` does not reap detached workers, so without this
+# the supervisor's new child fails with exit code 3 and loops forever.
+function Free-ApiPort {
+    param([int]$Port)
+    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    foreach ($connection in $connections) {
+        $holderPid = $connection.OwningProcess
+        if ($holderPid -eq $PID) { continue }
+        $holder = Get-CimInstance Win32_Process -Filter "ProcessId=$holderPid" -ErrorAction SilentlyContinue
+        if (-not $holder) { continue }
+        if ($holder.Name -notin @("python.exe", "pythonw.exe")) { continue }
+        Stop-Process -Id $holderPid -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+}
+
 # This PowerShell process is a supervisor. It keeps the Python service alive,
 # restores it if the browser is closed, and continuously enforces a visible,
 # topmost ChatGPT window when BROWSER_KEEP_FOREGROUND=true.
@@ -89,6 +106,8 @@ while ($true) {
     Add-Content -LiteralPath $supervisorLog -Encoding UTF8 -Value (
         "{0} | INFO     | supervisor | Starting Python API service" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     )
+    # Ensure no orphan from a previous Scheduled-Task run still holds 3061.
+    Free-ApiPort -Port 3061
     $server = Start-Process -FilePath $python `
         -ArgumentList @("-m", "src.api.server") `
         -WorkingDirectory $target `

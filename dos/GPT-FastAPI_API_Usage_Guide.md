@@ -1,11 +1,11 @@
 # GPT-FastAPI 服务器接口使用说明
 
-> 文件版本：1.4.4  
-> 更新日期：2026-08-18  
+> 文件版本：1.5.0  
+> 更新日期：2026-08-20  
 > 适用服务器：`192.168.10.48:3061`  
 > 当前提供方：ChatGPT 网页版（浏览器自动化，不调用 OpenAI 官方 API）
 
-本次文档修订已覆盖新版运维控制台、Task Conversation、Request 状态机、Conversation URL 持久化与可信局域网免登录模式。
+本次文档修订新增“ChatGPT 主动生成文件”捕获架构（P0/P1/P2/P3 优先级瀑布），并补全 Dashboard 项目授权视图在免登录模式下的空状态/刷新交互。所有 `/v1/files` 业务接口与原有 Dashboard 操作均未变更。
 
 ## 1. 服务概览
 
@@ -534,6 +534,40 @@ curl.exe -X POST "http://192.168.10.48:3061/v1/files" `
 
 Project Token 只能引用属于同一项目、同一 session 的文件。上传响应和生成文件响应中的 `download_url` 带有临时签名，应直接使用返回的地址下载。
 
+### 8.1 ChatGPT 主动生成文件的捕获（P0/P1/P2/P3 瀑布）
+
+当 ChatGPT 在回复中声明“生成了《xxx.md》”并渲染下载卡片时，前端会把 `attachments` 数组填进 `/v1/sessions/{id}/messages` 的响应，供调用方直接下载。捕获流程在 `src/files/generated.py` 中实现，按以下优先级瀑布执行：
+
+| 优先级 | 名称 | 触发方式 | 适用场景 |
+|---|---|---|---|
+| **P0** | DOM 卡片 + 真实点击 | 12 个新选择器（含 `a[href]` / `button` / `[role="link"]` / `[data-testid*="download" i]` / `[class*="download" i]` 等） + 跨 ShadowRoot 递归 + `findHref` 向上找到最近的 `href`/`data-href`/`data-url`/`data-file-url` + `page.expect_download()` + `click()` | ChatGPT 渲染了可点击的"点击下载《xxx.md》"链接 / 按钮 |
+| **P1** | NetworkFileCapture 回填 | Playwright `response` 监听器匹配 `Content-Disposition: attachment` / `application/octet-stream` / `text/markdown` / `text/plain` / `application/json` | P0 点击触发的浏览器下载事件被过滤 / 点击未触发 download 事件 |
+| **P2** | 浏览器上下文 `fetch` | `page.context.request.get(href, ...)` 直接拉取 href（保留 Cookies / Authorization） | 拿到了 href 但前两级没拿到内容（如 sandbox 协议、超大文件预检） |
+| **P3** | 全页 URL 扫描 | `_scan_page_attachment_urls` 在 `document` 上再走一遍 Shadow DOM + 多属性扫描 | 上述全部失败但页面某处仍残留下载 URL |
+
+四道降级是连续触发的：P0 失败 → 自动走 P1；P1 没回填 → 走 P2；P2 失败 → 走 P3。任意一级拿到字节流后立即停止后续尝试，并对结果统一做：
+
+- **Magic Bytes 校验**：识别 `%PDF-` / `PK\x03\x04` 等真实文件头，丢弃 HTML 错误页。
+- **SHA256 去重**：与 `files` 表的 `sha256` 索引比对，命中即跳过落盘。
+- **大小 / 非空检查**：单文件 50 MB 上限，0 字节文件直接判 `FILE_EMPTY`。
+- **文件名清洗**：`extractFilename()` 优先抽取 `《》` 括号内的真实文件名（`点击下载《xxx.md》` → `xxx.md`），退回到纯扩展名匹配，避免保存整段中文提示。
+
+调用方不需感知 P0/P1/P2/P3 细节。响应里 `attachments[]` 只会列出最终命中的文件，每条带 `file_id`（与 `/v1/files` 同源）、`filename`、`mime_type`、`size_bytes`、`sha256`、`download_url`。
+
+常见异常码（结构化日志中可见）：
+
+| Error Code | 触发条件 | 客户端建议 |
+|---|---|---|
+| `NO_ATTACHMENT` | 全部优先级瀑布未找到任何候选 | 检查消息正文是否真生成文件 |
+| `ATTACHMENT_RENDER_TIMEOUT` | 15 s 内 DOM 卡片未稳定出现 2 轮 | 通常是 ChatGPT 假装生成了但没渲染，重复请求或换 prompt |
+| `DOWNLOAD_BUTTON_NOT_FOUND` | P0 找到 href 但 nearest `<a>` 不可点击 | 等待或重试 |
+| `DOWNLOAD_EVENT_TIMEOUT` | `page.expect_download()` 等 30 s 没收到 download 事件 | 升级 P0 选择器或确认 Card 真的渲染 |
+| `NETWORK_CAPTURE_FAILED` | P1 监听到 0 个 response | 检查 ChatGPT 是否走 sandbox 协议 |
+| `BROWSER_FETCH_FAILED` | P2 拉取 href 失败 | 检查网络 / Cookie 是否还有效 |
+| `FILE_EMPTY` / `FILE_INVALID` | 落盘文件为空 / Magic Bytes 异常 | 不重试，记录后跳过 |
+
+调试时优先看 `logs/generated_files_YYYY-MM-DD.log` 末尾的 `[GENERATED_FILE]` 行；每条命中/失败都会带文件名、`has_download_button`、P 级别标记。
+
 ## 9. 单 Worker 串行队列
 
 查看池状态：
@@ -715,6 +749,12 @@ C:\ChatGPTAPI\logs
 | `POST` | `/api/dashboard/projects/{project_id}/rotate` | 轮换 Token，旧 Token 立即失效 |
 | `PATCH` | `/api/dashboard/projects/{project_id}` | 启用或停用 Token |
 | `DELETE` | `/api/dashboard/projects/{project_id}` | 删除并吊销 Token |
+
+视图交互：
+
+- 当 `DASHBOARD_REQUIRE_ADMIN_TOKEN=false` 时，Dashboard 不会再要求输入管理员 Token；前端会主动调用 `/api/dashboard/projects` 拉取已有项目记录，header 上不会带 `X-Admin-Token`。
+- 视图顶部右侧新增"刷新"按钮 + 最后刷新时间（`更新于 HH:MM:SS`）。点击或切换到该 tab 都会触发重新拉取；失败时 tag 会变红并显示具体错误，可直接重试。
+- "尚未创建项目 Token（下方表单可生成）"是空状态文案；当 `items.length === 0` 时展示，不再误判为加载失败。
 
 ### 11.3 启动或停止浏览器运行层
 

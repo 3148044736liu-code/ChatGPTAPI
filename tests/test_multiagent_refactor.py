@@ -156,6 +156,12 @@ async def test_timeout_is_an_error_not_partial_success(monkeypatch):
 
 
 class _FakePage:
+    def __init__(self):
+        self.listeners = {}
+
+    def on(self, event, handler):
+        self.listeners[event] = handler
+
     def is_closed(self):
         return False
 

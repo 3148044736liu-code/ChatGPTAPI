@@ -22,7 +22,7 @@ async def random_delay(min_ms: int | None = None, max_ms: int | None = None) -> 
 
 async def human_type(page: Page, selector: str, text: str) -> None:
     """
-    Insert text into a contenteditable input field.
+    Insert text into ChatGPT's textarea or contenteditable input field.
 
     Uses execCommand('insertText') which fires proper beforeinput/input
     events that ProseMirror-based editors (like ChatGPT's) require.
@@ -30,6 +30,20 @@ async def human_type(page: Page, selector: str, text: str) -> None:
     """
     element = page.locator(selector).first
     await element.click()
+
+    # The current ChatGPT homepage renders a real textarea while existing
+    # conversations can still use the ProseMirror contenteditable composer.
+    # Locator.fill handles the native value setter and input events correctly.
+    try:
+        is_form_control = await element.evaluate(
+            "el => el.matches('textarea, input')"
+        )
+        if is_form_control:
+            await element.fill(text)
+            log.debug("Inserted text via locator.fill")
+            return
+    except Exception as e:
+        log.debug(f"Native form control insertion failed: {e}")
 
     # Clear any stale text in the input before inserting new text
     try:
@@ -104,7 +118,7 @@ async def human_type(page: Page, selector: str, text: str) -> None:
         actual = await page.evaluate(
             """(selector) => {
                 const el = document.querySelector(selector);
-                return el ? (el.innerText || el.textContent || '').trim() : '';
+                return el ? (el.value || el.innerText || el.textContent || '').trim() : '';
             }""",
             selector,
         )

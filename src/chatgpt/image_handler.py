@@ -32,8 +32,138 @@ from src.log import setup_logging
 
 log = setup_logging("image_handler")
 
+_IMAGE_MATERIALIZE_TIMEOUT_MS = 15_000
+_IMAGE_POLL_INTERVAL_MS = 250
 
-async def detect_images_in_response(page: Page) -> list[dict]:
+
+async def _generated_image_snapshot(page: Page) -> dict:
+    """Inspect the latest assistant turn for image markers and usable URLs."""
+    result = await page.evaluate(r"""
+        () => {
+            const turns = Array.from(
+                document.querySelectorAll('section[data-testid^="conversation-turn-"]')
+            );
+            let lastTurn = null;
+            for (let idx = turns.length - 1; idx >= 0; idx--) {
+                const turn = turns[idx];
+                const role = turn.getAttribute('data-turn');
+                const isAssistant = role === 'assistant' || Boolean(
+                    turn.querySelector('[data-message-author-role="assistant"]')
+                );
+                if (isAssistant) {
+                    lastTurn = turn;
+                    break;
+                }
+            }
+            if (!lastTurn) return {hasMarker: false, images: []};
+
+            // Imagegen web components can place the real image in a ShadowRoot.
+            const roots = [lastTurn];
+            for (let idx = 0; idx < roots.length; idx++) {
+                const root = roots[idx];
+                const elements = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                for (const element of elements) {
+                    if (element.shadowRoot) roots.push(element.shadowRoot);
+                }
+            }
+
+            let title = '';
+            for (const root of roots) {
+                for (const button of root.querySelectorAll('button')) {
+                    const text = (button.innerText || '').trim();
+                    const bulletIdx = text.indexOf('•');
+                    if (bulletIdx > -1) {
+                        title = text.substring(bulletIdx + 1).trim();
+                        break;
+                    }
+                }
+                if (title) break;
+            }
+            if (!title) {
+                for (const root of roots) {
+                    for (const span of root.querySelectorAll('span.text-token-text-tertiary')) {
+                        const text = (span.innerText || '').trim();
+                        if (text.length > 5 && text.length < 200) {
+                            title = text;
+                            break;
+                        }
+                    }
+                    if (title) break;
+                }
+            }
+
+            let hasMarker = false;
+            const found = new Map();
+            const addImage = (url, alt = '') => {
+                const normalized = (url || '').trim();
+                if (!normalized || found.has(normalized)) return;
+                found.set(normalized, {url: normalized, alt, title});
+            };
+
+            for (const root of roots) {
+                const containers = root.querySelectorAll(
+                    'div[id^="image-"], div[class*="imagegen-image"]'
+                );
+                if (containers.length > 0) hasMarker = true;
+
+                const directImages = root.querySelectorAll(
+                    'img[alt="Generated image"], '
+                    + 'div[id^="image-"] img, '
+                    + 'div[class*="imagegen-image"] img, '
+                    + 'img[src*="backend-api/estuary"], '
+                    + 'img[src*="backend-api/files"], '
+                    + 'img[src^="blob:"]'
+                );
+                if (directImages.length > 0) hasMarker = true;
+                for (const img of directImages) {
+                    addImage(img.currentSrc || img.src || img.getAttribute('src'), img.alt || '');
+                }
+
+                // Keep the old large-image fallback for provider UI variants.
+                for (const img of root.querySelectorAll('img')) {
+                    const width = img.naturalWidth || img.width || 0;
+                    const url = img.currentSrc || img.src || img.getAttribute('src') || '';
+                    if (width > 200 && (
+                        url.includes('backend-api/estuary')
+                        || url.includes('backend-api/files')
+                        || url.startsWith('blob:')
+                    )) {
+                        hasMarker = true;
+                        addImage(url, img.alt || '');
+                    }
+                }
+
+                // Some imagegen builds render the result as a CSS background.
+                for (const container of containers) {
+                    const candidates = [container, ...container.querySelectorAll('*')];
+                    for (const element of candidates) {
+                        const background = getComputedStyle(element).backgroundImage || '';
+                        for (const match of background.matchAll(/url\((['"]?)(.*?)\1\)/g)) {
+                            const url = match[2] || '';
+                            if (
+                                url.includes('backend-api/estuary')
+                                || url.includes('backend-api/files')
+                                || url.startsWith('blob:')
+                            ) {
+                                addImage(url, element.getAttribute('aria-label') || '');
+                            }
+                        }
+                    }
+                }
+            }
+
+            return {hasMarker, images: Array.from(found.values())};
+        }
+    """)
+    return result if isinstance(result, dict) else {"hasMarker": False, "images": []}
+
+
+async def detect_images_in_response(
+    page: Page,
+    *,
+    timeout_ms: int = _IMAGE_MATERIALIZE_TIMEOUT_MS,
+    poll_interval_ms: int = _IMAGE_POLL_INTERVAL_MS,
+) -> list[dict]:
     """
     Check the last conversation turn for generated images.
 
@@ -45,101 +175,35 @@ async def detect_images_in_response(page: Page) -> list[dict]:
 
     Returns a list of dicts: [{url, alt, title}, ...] or empty list.
     """
-    result = await page.evaluate("""
-        () => {
-            const turns = document.querySelectorAll('section[data-testid^="conversation-turn-"]');
-            if (turns.length === 0) return [];
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000
+    marker_seen = False
 
-            const lastTurn = turns[turns.length - 1];
+    while True:
+        snapshot = await _generated_image_snapshot(page)
+        result = snapshot.get("images") or []
+        if result:
+            log.info(f"Detected {len(result)} generated image(s) in response")
+            for i, img in enumerate(result):
+                log.debug(
+                    f"  Image {i+1}: alt='{img.get('alt', '')[:50]}', "
+                    f"url={img.get('url', '')[:80]}..."
+                )
+            return result
 
-            // Find generated images — primary: alt="Generated image"
-            let images = lastTurn.querySelectorAll('img[alt="Generated image"]');
+        has_marker = bool(snapshot.get("hasMarker"))
+        marker_seen = marker_seen or has_marker
+        if not marker_seen:
+            log.debug("No generated images detected in response")
+            return []
 
-            // Fallback: images inside imagegen containers
-            if (images.length === 0) {
-                const containers = lastTurn.querySelectorAll('div[id^="image-"]');
-                if (containers.length > 0) {
-                    const imgSet = new Set();
-                    for (const c of containers) {
-                        const imgs = c.querySelectorAll('img');
-                        for (const img of imgs) imgSet.add(img);
-                    }
-                    images = [...imgSet];
-                }
-            }
+        if time.monotonic() >= deadline:
+            log.warning(
+                "Generated image container detected, but no usable image URL "
+                "materialized before timeout"
+            )
+            return []
 
-            // Fallback: any large image from chatgpt backend
-            if (images.length === 0) {
-                const allImgs = lastTurn.querySelectorAll('img');
-                const large = [];
-                for (const img of allImgs) {
-                    const w = img.naturalWidth || img.width || 0;
-                    const src = img.src || '';
-                    if (w > 200 && (
-                        src.includes('backend-api/estuary') ||
-                        src.includes('chatgpt.com')
-                    )) {
-                        large.push(img);
-                    }
-                }
-                images = large;
-            }
-
-            if (!images || images.length === 0) return [];
-
-            // Deduplicate by src URL
-            const seen = new Set();
-            const results = [];
-
-            for (const img of images) {
-                const src = img.src || '';
-                if (!src || seen.has(src)) continue;
-                seen.add(src);
-
-                const alt = img.alt || '';
-
-                // Extract the image title from nearby text in the turn
-                // ChatGPT shows "Creating image • Image Title" in a button/span
-                let title = '';
-                const buttons = lastTurn.querySelectorAll('button');
-                for (const btn of buttons) {
-                    const text = (btn.innerText || '').trim();
-                    // Parse "Creating image • Title" or just "Title"
-                    const bulletIdx = text.indexOf('•');
-                    if (bulletIdx > -1) {
-                        title = text.substring(bulletIdx + 1).trim();
-                        break;
-                    }
-                }
-                // Fallback: look for text spans in the turn
-                if (!title) {
-                    const spans = lastTurn.querySelectorAll(
-                        'span.text-token-text-tertiary'
-                    );
-                    for (const span of spans) {
-                        const t = (span.innerText || '').trim();
-                        if (t.length > 5 && t.length < 200) {
-                            title = t;
-                            break;
-                        }
-                    }
-                }
-
-                results.push({ url: src, alt, title });
-            }
-
-            return results;
-        }
-    """)
-
-    if result:
-        log.info(f"Detected {len(result)} generated image(s) in response")
-        for i, img in enumerate(result):
-            log.debug(f"  Image {i+1}: alt='{img.get('alt', '')[:50]}', url={img.get('url', '')[:80]}...")
-    else:
-        log.debug("No generated images detected in response")
-
-    return result or []
+        await asyncio.sleep(max(poll_interval_ms, 0) / 1000)
 
 
 async def download_image(page: Page, url: str, filename_hint: str = "") -> str:

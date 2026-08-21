@@ -1,6 +1,7 @@
 # Browser profiles and bundled browsers
 browser_data/
 browser_data_claude/
+browser_data_*/
 chrome-profile/
 .browsers/
 
@@ -10,8 +11,17 @@ docker-logs/
 downloads/
 data/
 .codex_backup/
+*.bak_codex_*
 .setup/
 .runtime/
+
+# Local diagnosis scripts (the restart helper is intentionally tracked)
+tools/_check_p0_loaded.py
+tools/_db_*.py
+tools/_diag_*.ps1
+tools/_projects_db_inspect.py
+tools/_regex_probe.py
+tools/_validate_*.py
 
 # Python
 __pycache__/

@@ -181,6 +181,10 @@ class BrowserManager:
             viewport={"width": width, "height": height},
             locale="en-US",
             timezone_id="America/Los_Angeles",
+            # Accept downloads is required for `page.expect_download` to
+            # ever fire.  Without this, the new DOM-click download path
+            # in src/files/generated.py cannot work.
+            accept_downloads=True,
             args=chrome_args,
         )
         if proxy_server:

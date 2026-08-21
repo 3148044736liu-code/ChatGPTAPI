@@ -76,6 +76,8 @@
     .band-head p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
     .band-tools { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
     .tag { border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .tag.loading { color: var(--amber); border-color: var(--amber); animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
     .two-col { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); gap: 12px; margin-top: 12px; }
     .two-col .band { margin-top: 0; }
     .detail-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -194,10 +196,10 @@
     </section>
 
     <section class="view" id="view-projects">
-      <article class="band"><div class="band-head"><div><h2>项目授权 Token</h2><p>Token 使用 Windows DPAPI 加密保存</p></div><span class="tag" id="projectTag">0 个项目</span></div>
+      <article class="band"><div class="band-head"><div><h2>项目授权 Token</h2><p>Token 使用 Windows DPAPI 加密保存 · <span id="projectsRefreshedAt" class="subtle">尚未刷新</span></p></div><div class="band-tools"><button class="btn small" id="refreshProjects" type="button">刷新</button><span class="tag" id="projectTag">0 个项目</span></div></div>
         <form class="project-form" id="projectForm"><input class="field" id="projectName" placeholder="项目名称" required maxlength="120"><input class="field" id="projectId" placeholder="项目 ID（可留空）" maxlength="80"><input class="field" id="projectDesc" placeholder="用途说明" maxlength="500"><label class="check"><input id="projectMultiAgent" type="checkbox">多智能体项目</label><button class="btn primary" type="submit">生成 Token</button></form>
         <div class="token-reveal" id="tokenReveal"><strong>项目 Token</strong><code id="tokenValue"></code><button class="btn small" id="copyToken" type="button">复制 Token</button></div>
-        <div class="table-wrap"><table><thead><tr><th>项目</th><th>模式</th><th>Token</th><th>会话 / 消息</th><th>最近使用</th><th>状态 / 操作</th></tr></thead><tbody id="projectsBody"></tbody></table><div class="empty" id="projectsEmpty">尚未创建项目 Token</div></div>
+        <div class="table-wrap"><table><thead><tr><th>项目</th><th>模式</th><th>Token</th><th>会话 / 消息</th><th>最近使用</th><th>状态 / 操作</th></tr></thead><tbody id="projectsBody"></tbody></table><div class="empty" id="projectsEmpty">尚未创建项目 Token（下方表单可生成）</div></div>
       </article>
     </section>
 
@@ -224,6 +226,10 @@
     const statusText = status => ({created:'已创建',active:'活跃',idle:'空闲',error:'错误',queued:'排队中',sending:'发送中',sent:'已发送',waiting_response:'等待回复',completed:'已完成',failed:'失败',cancelled:'已取消',unknown:'未知',running:'运行中',starting:'启动中',stopping:'停止中',stopped:'已停止',healthy:'正常',challenged:'需人工验证',limited:'限流',cooling:'冷却中',disabled:'已禁用'})[status] || status || '--';
     const badge = status => `<span class="badge ${statusClass(status)}"><span class="dot ${statusClass(status)==='ok'?'ok':statusClass(status)==='bad'?'bad':'warn'}"></span>${escapeHtml(statusText(status))}</span>`;
     const headers = extra => ({...(extra||{}), ...(adminToken ? {'X-Admin-Token':adminToken} : {})});
+    // Only require the admin token when the server actually enforces it.
+    // `currentState` is populated by /api/dashboard/state and tells us
+    // `service.dashboard_auth_required` (defaults to true for safety).
+    const _authRequired = () => (currentState?.service?.dashboard_auth_required !== false) && (adminToken === '');
     function toast(message) { clearTimeout(toastTimer); $('toast').textContent=message; $('toast').classList.add('show'); toastTimer=setTimeout(()=>$('toast').classList.remove('show'),2200); }
     function setLive(kind,text) { $('liveDot').className=`dot ${kind}`; $('liveText').textContent=text; }
     async function responseError(response) { try { const body=await response.json(); return body.detail || body.error?.message || `HTTP ${response.status}`; } catch { return `HTTP ${response.status}`; } }
@@ -244,7 +250,7 @@
       catch(error) { lockConsole(error.message==='Invalid or missing admin token'?'请输入管理员 Token':`连接失败：${error.message}`); }
     }
     async function loadState(showToast=false) {
-      if(!adminToken) return;
+      if(_authRequired() && !adminToken) return;
       try { const state=await apiJson('/api/dashboard/state'); currentState=state; render(state); setLive('ok','实时连接'); if(showToast) toast('状态已刷新'); }
       catch(error) { if(/token/i.test(error.message)) lockConsole('认证已失效，请重新输入管理员 Token'); else { setLive('bad',`连接异常 · ${error.message}`); if(showToast) toast(error.message); } }
     }
@@ -281,9 +287,35 @@
       $('tasksBody').innerHTML=tasks.map(item=>{const url=safeConversationUrl(item.provider_thread_url); const conversation=url?`<a class="primary-text mono" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(shortId(item.provider_thread_id))}</a><div class="subtle"><button class="btn small" data-copy="${escapeHtml(url)}" type="button">复制 URL</button></div>`:'<span class="subtle">尚未创建</span>'; return `<tr><td><div class="primary-text">${escapeHtml(item.name)}</div><div class="subtle mono" title="${escapeHtml(item.task_id)}">${escapeHtml(shortId(item.task_id))}</div></td><td>${escapeHtml(item.project_name||item.project_id)}<div class="subtle">${escapeHtml(item.agent_id)}</div></td><td>${badge(item.status)}</td><td>${conversation}</td><td>${escapeHtml(timeText(item.last_started_at))}</td><td>${escapeHtml(timeText(item.updated_at))}</td></tr>`;}).join('');
       $('requestsBody').innerHTML=requests.map(item=>`<tr><td class="mono" title="${escapeHtml(item.id)}">${escapeHtml(shortId(item.id))}</td><td>${escapeHtml(item.task_name||'--')}<div class="subtle mono" title="${escapeHtml(item.task_id||'')}">${escapeHtml(shortId(item.task_id))}</div></td><td>${escapeHtml(item.project_name||item.project_id)}<div class="subtle">${escapeHtml(item.agent_id||'--')}</div></td><td>${badge(item.status)}</td><td class="mono">${escapeHtml(item.error_type||'--')}</td><td>${elapsed(item.sent_at||item.created_at,item.completed_at)}</td><td>${escapeHtml(timeText(item.updated_at))}</td></tr>`).join('');
     }
-    async function loadProjects() { if(!adminToken)return; try { const data=await apiJson('/api/dashboard/projects'); renderProjects(data.data||[]); } catch(error) { toast(`项目列表加载失败：${error.message}`); } }
+    async function loadProjects() {
+      if(_authRequired() && !adminToken) return;
+      const tag = $('projectTag');
+      const empty = $('projectsEmpty');
+      const body = $('projectsBody');
+      if (tag) { tag.textContent = '加载中…'; tag.classList.add('loading'); }
+      if (empty) { empty.classList.add('hidden'); }
+      try {
+        const data = await apiJson('/api/dashboard/projects');
+        renderProjects(data.data || []);
+        const ts = $('projectsRefreshedAt');
+        if (ts) ts.textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', {hour12:false})}`;
+      } catch (error) {
+        if (tag) { tag.textContent = '加载失败'; tag.classList.remove('loading'); }
+        if (empty) {
+          empty.classList.remove('hidden');
+          empty.textContent = `项目列表加载失败：${error.message}（点击右侧"刷新"重试）`;
+        }
+        toast(`项目列表加载失败：${error.message}`);
+      }
+    }
     function renderProjects(items) {
-      $('projectTag').textContent=`${items.length} 个项目`; $('projectsEmpty').classList.toggle('hidden',items.length>0);
+      const tag = $('projectTag');
+      const empty = $('projectsEmpty');
+      if (tag) { tag.classList.remove('loading'); tag.textContent = `${items.length} 个项目`; }
+      if (empty) {
+        empty.classList.toggle('hidden', items.length > 0);
+        empty.textContent = items.length === 0 ? '尚未创建项目 Token（下方表单可生成）' : '';
+      }
       $('projectsBody').innerHTML=items.map(item=>`<tr><td><div class="primary-text">${escapeHtml(item.name)}</div><div class="subtle">${escapeHtml(item.project_id)} · ${escapeHtml(item.description||'无说明')}</div></td><td>${item.multi_agent?'多智能体':'单项目'}</td><td><span class="mono">${escapeHtml(item.token_prefix)}••••</span> <button class="btn small" data-project-action="copy" data-project-id="${escapeHtml(item.project_id)}" ${item.token_available?'':'disabled'} type="button">${item.token_available?'复制':'需轮换'}</button></td><td>${item.session_count||0} / ${item.message_count||0}</td><td>${escapeHtml(timeText(item.last_used_at))}</td><td>${badge(item.enabled?'active':'disabled')} <button class="btn small" data-project-action="toggle" data-enabled="${!item.enabled}" data-project-id="${escapeHtml(item.project_id)}" type="button">${item.enabled?'停用':'启用'}</button> <button class="btn small" data-project-action="rotate" data-project-id="${escapeHtml(item.project_id)}" type="button">轮换</button> <button class="btn small danger" data-project-action="delete" data-project-id="${escapeHtml(item.project_id)}" type="button">删除</button></td></tr>`).join('');
     }
     function revealToken(token) { $('tokenValue').textContent=token; $('tokenReveal').classList.add('show'); }
@@ -298,7 +330,7 @@
       } catch(error){toast(error.message);} finally {button.disabled=false;}
     }
     async function loadLogs() {
-      if(!adminToken)return; const selected=$('logFile').value; const query=selected?`?file=${encodeURIComponent(selected)}&lines=500`:'?lines=500';
+      if(_authRequired() && !adminToken) return; const selected=$('logFile').value; const query=selected?`?file=${encodeURIComponent(selected)}&lines=500`:'?lines=500';
       try { const data=await apiJson(`/api/dashboard/logs${query}`); const chosen=selected||data.selected||''; $('logFile').innerHTML=(data.files||[]).map(item=>`<option value="${escapeHtml(item.name)}" ${item.name===chosen?'selected':''}>${escapeHtml(item.name)} · ${fmtBytes(item.size)}</option>`).join(''); logLines=data.lines||[]; renderLogs(); }
       catch(error){$('logView').textContent=`日志读取失败：${error.message}`;}
     }
@@ -309,6 +341,7 @@
     $('authForm').addEventListener('submit',event=>{event.preventDefault();authenticate($('adminToken').value);});
     $('lockBtn').addEventListener('click',()=>lockConsole());
     document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{currentView=tab.dataset.view;document.querySelectorAll('.tab').forEach(item=>item.classList.toggle('active',item===tab));document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id===`view-${currentView}`));if(currentView==='logs')loadLogs();if(currentView==='projects')loadProjects();}));
+    $('refreshProjects').addEventListener('click',()=>loadProjects());
     $('refreshBtn').addEventListener('click',()=>{loadState(true);if(currentView==='logs')loadLogs();if(currentView==='projects')loadProjects();});
     $('startRuntime').addEventListener('click',()=>controlRuntime('start')); $('stopRuntime').addEventListener('click',()=>controlRuntime('stop')); $('downloadGuide').addEventListener('click',downloadGuide);
     $('copyEndpoint').addEventListener('click',async event=>toast(await copyText(event.currentTarget.dataset.copy)?'Base URL 已复制':'复制失败'));
